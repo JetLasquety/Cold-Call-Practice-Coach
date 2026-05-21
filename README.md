@@ -8,16 +8,11 @@ Simulates a live cold call with an AI-generated prospect, then generates a struc
 Flow: Select difficulty → Mock call → Coaching report
 
 Features
-
 Randomized prospect profiles across 3 difficulty tiers (Easy / Medium / Hard)
-
 Varies by business type, industry, digital presence, role, persona, mood, and resistance level
-
-
 Live mock call — AI plays a realistic prospect; stays in character; does not coach mid-call
 Auto coaching report — generated after call ends, covering outcome, objection handling, frame control, KPI check, and a rewritten practice line
 Bounded history — last 10 exchanges (20 messages) sent to API per turn
-
 
 Setup
 Requirements
