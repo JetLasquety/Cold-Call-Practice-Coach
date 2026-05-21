@@ -1,11 +1,16 @@
-import streamlit as st
-import google.generativeai as genai
+import os
+import base64
+import io
 import random
 
+import streamlit as st
+import google.generativeai as genai
+from gtts import gTTS
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY = "AIzaSyB022N6ANvaOagye2WYlsRNPSkpPg3taVM"
-MODEL_NAME     = "gemini-2.5-flash"
-MAX_EXCHANGES  = 10   # bounded history (10 pairs = 20 messages max sent to API)
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+MODEL_NAME     = "gemini-2.0-flash"
+MAX_EXCHANGES  = 10
 
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -151,17 +156,17 @@ _RESISTANCE = {
 
 
 def generate_prospect(difficulty: str) -> dict:
-    d = difficulty  # "Easy" | "Medium" | "Hard"
+    d = difficulty
     business, industry = random.choice(_BUSINESSES[d])
     return {
-        "business":        business,
-        "industry":        industry,
+        "business":         business,
+        "industry":         industry,
         "digital_presence": random.choice(_DIGITAL[d]),
-        "role":            random.choice(_ROLES[d]),
-        "persona":         random.choice(_PERSONAS[d]),
-        "mood":            random.choice(_MOODS[d]),
-        "resistance":      random.choice(_RESISTANCE[d]),
-        "difficulty":      d,
+        "role":             random.choice(_ROLES[d]),
+        "persona":          random.choice(_PERSONAS[d]),
+        "mood":             random.choice(_MOODS[d]),
+        "resistance":       random.choice(_RESISTANCE[d]),
+        "difficulty":       d,
     }
 
 
@@ -188,7 +193,6 @@ def _build_model(system_prompt: str, temperature: float):
 
 
 def _to_gemini_history(messages: list) -> list:
-    """Convert {role, content} list to Gemini history format."""
     history = []
     for msg in messages:
         role = "user" if msg["role"] == "user" else "model"
@@ -199,6 +203,39 @@ def _to_gemini_history(messages: list) -> list:
 def _bounded(messages: list) -> list:
     max_msgs = MAX_EXCHANGES * 2
     return messages[-max_msgs:] if len(messages) > max_msgs else messages
+
+
+def transcribe_audio(audio_bytes: bytes) -> str:
+    """Send audio to Gemini for transcription."""
+    model = genai.GenerativeModel(MODEL_NAME)
+    audio_part = {
+        "inline_data": {
+            "mime_type": "audio/wav",
+            "data": base64.b64encode(audio_bytes).decode(),
+        }
+    }
+    resp = model.generate_content([
+        audio_part,
+        "Transcribe exactly what is spoken. Return only the spoken words, nothing else.",
+    ])
+    return resp.text.strip()
+
+
+def text_to_speech(text: str) -> bytes:
+    """Convert text to MP3 bytes via gTTS."""
+    buf = io.BytesIO()
+    gTTS(text=text, lang="en", slow=False).write_to_fp(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+def autoplay_audio(audio_bytes: bytes):
+    """Inject an auto-playing <audio> tag into the page."""
+    b64 = base64.b64encode(audio_bytes).decode()
+    st.markdown(
+        f'<audio autoplay><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>',
+        unsafe_allow_html=True,
+    )
 
 
 def prospect_opening(profile_str: str) -> str:
@@ -215,7 +252,7 @@ def prospect_opening(profile_str: str) -> str:
 def prospect_reply(profile_str: str, messages: list) -> str:
     system  = BASE_RULES + "\n\n" + MOCK_CALL_PROMPT.format(prospect_profile=profile_str)
     bounded = _bounded(messages)
-    history = _to_gemini_history(bounded[:-1])   # all but last
+    history = _to_gemini_history(bounded[:-1])
     model   = _build_model(system, temperature=0.45)
     chat    = model.start_chat(history=history)
     resp    = chat.send_message(bounded[-1]["content"])
@@ -236,12 +273,13 @@ def coaching_report(profile_str: str, transcript: str) -> str:
 # ── STATE INIT ────────────────────────────────────────────────────────────────
 def init_state():
     defaults = {
-        "mode":            "selection",   # selection | mock_call | coach_evaluation
-        "messages":        [],
-        "transcript":      "",
+        "mode":             "selection",
+        "messages":         [],
+        "transcript":       "",
         "prospect_context": None,
-        "difficulty":      "Medium",
-        "coaching_output": "",
+        "difficulty":       "Medium",
+        "coaching_output":  "",
+        "pending_audio":    None,   # MP3 bytes to autoplay on next render
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -253,7 +291,7 @@ def prospect_card(p: dict):
     resistance_color = {
         "very low": "#2ecc71", "low": "#82e0aa",
         "moderate": "#f39c12", "medium": "#f0b27a",
-        "high": "#e74c3c", "very high": "#c0392b",
+        "high": "#e74c3c",     "very high": "#c0392b",
     }.get(p["resistance"].lower(), "#aaa")
 
     difficulty_color = {
@@ -306,7 +344,7 @@ def format_transcript(messages: list) -> str:
 # ── PAGES ─────────────────────────────────────────────────────────────────────
 def page_selection():
     st.markdown("## 📞 Cold Call Practice Coach")
-    st.markdown("**v1 — Outbound Web Design Setter Training**")
+    st.markdown("**v2 — Voice Mode**")
     st.divider()
 
     st.markdown("##### Select Difficulty")
@@ -325,15 +363,21 @@ def page_selection():
     | Hard | Skeptical, guarded, existing web guy |
     """)
 
+    st.info(
+        "🎙️ **Voice mode:** Record your line using the mic button. "
+        "The prospect will respond via audio. End the call to get your coaching report."
+    )
+
     st.divider()
 
     if st.button("▶ Start Mock Call", type="primary", use_container_width=True):
-        st.session_state.difficulty      = difficulty
+        st.session_state.difficulty       = difficulty
         st.session_state.prospect_context = generate_prospect(difficulty)
-        st.session_state.messages        = []
-        st.session_state.transcript      = ""
-        st.session_state.coaching_output = ""
-        st.session_state.mode            = "mock_call"
+        st.session_state.messages         = []
+        st.session_state.transcript       = ""
+        st.session_state.coaching_output  = ""
+        st.session_state.pending_audio    = None
+        st.session_state.mode             = "mock_call"
         st.rerun()
 
 
@@ -343,7 +387,12 @@ def page_mock_call():
 
     prospect_card(p)
 
-    # End Call button sits above chat
+    # Autoplay queued audio from previous turn
+    if st.session_state.pending_audio:
+        autoplay_audio(st.session_state.pending_audio)
+        st.session_state.pending_audio = None
+
+    # End Call button
     col_space, col_btn = st.columns([4, 1])
     with col_btn:
         end_clicked = st.button("⚡ End Call", type="secondary", use_container_width=True)
@@ -360,23 +409,46 @@ def page_mock_call():
     # Generate prospect opening on first load
     if not st.session_state.messages:
         with st.spinner("Connecting call..."):
-            opening = prospect_opening(profile_str)
+            opening     = prospect_opening(profile_str)
+            opening_mp3 = text_to_speech(opening)
         st.session_state.messages.append({"role": "assistant", "content": opening})
+        st.session_state.pending_audio = opening_mp3
         st.rerun()
 
-    # Render chat history
+    # Render chat history as transcript
     for msg in st.session_state.messages:
+        label = "You" if msg["role"] == "user" else "Prospect"
         with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+            st.markdown(f"**{label}:** {msg['content']}")
 
-    # Chat input
-    user_input = st.chat_input("Your line...")
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.spinner(""):
-            reply = prospect_reply(profile_str, st.session_state.messages)
-        st.session_state.messages.append({"role": "assistant", "content": reply})
-        st.rerun()
+    st.divider()
+    st.markdown("##### 🎙️ Your Turn — Record Your Line")
+
+    # Voice input — key changes each turn to force widget reset after submit
+    audio_input = st.audio_input(
+        label="Record",
+        label_visibility="collapsed",
+        key=f"audio_{len(st.session_state.messages)}",
+    )
+
+    if audio_input is not None:
+        audio_bytes = audio_input.read()
+
+        with st.spinner("Transcribing..."):
+            user_text = transcribe_audio(audio_bytes)
+
+        if user_text:
+            st.session_state.messages.append({"role": "user", "content": user_text})
+
+            with st.spinner("Prospect responding..."):
+                reply     = prospect_reply(profile_str, st.session_state.messages)
+                reply_mp3 = text_to_speech(reply)
+
+            st.session_state.messages.append({"role": "assistant", "content": reply})
+            st.session_state.pending_audio = reply_mp3
+            st.rerun()
+        else:
+            st.warning("Could not transcribe audio. Try again.")
 
 
 def page_coach_evaluation():
@@ -399,10 +471,11 @@ def page_coach_evaluation():
         if st.button("🔁 New Call — Same Difficulty", type="primary", use_container_width=True):
             d = st.session_state.difficulty
             st.session_state.prospect_context = generate_prospect(d)
-            st.session_state.messages        = []
-            st.session_state.transcript      = ""
-            st.session_state.coaching_output = ""
-            st.session_state.mode            = "mock_call"
+            st.session_state.messages         = []
+            st.session_state.transcript       = ""
+            st.session_state.coaching_output  = ""
+            st.session_state.pending_audio    = None
+            st.session_state.mode             = "mock_call"
             st.rerun()
     with col2:
         if st.button("🏠 Back to Menu", use_container_width=True):
@@ -416,7 +489,7 @@ def page_coach_evaluation():
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
-        page_title="Cold Call Coach v1",
+        page_title="Cold Call Coach v2",
         page_icon="📞",
         layout="centered",
     )
